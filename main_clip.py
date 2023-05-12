@@ -11,13 +11,14 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR100
+from torchvision.datasets import CIFAR100, Flowers102
 
 import clip
 from models import prompters
 from utils import accuracy, AverageMeter, ProgressMeter, save_checkpoint
 from utils import cosine_lr, convert_models_to_fp32, refine_classname
 
+import pandas as pd
 
 
 def parse_option():
@@ -141,21 +142,42 @@ def main():
     template = 'This is a photo of a {}'
     print(f'template: {template}')
 
-    train_dataset = CIFAR100(args.root, transform=preprocess,
-                             download=True, train=True)
+    if args.dataset == "cifar100":
+      train_dataset = CIFAR100(args.root, transform=preprocess,
+                              download=True, train=True)
 
-    val_dataset = CIFAR100(args.root, transform=preprocess,
-                           download=True, train=False)
+      val_dataset = CIFAR100(args.root, transform=preprocess,
+                            download=True, train=False)
 
-    train_loader = DataLoader(train_dataset,
+      train_loader = DataLoader(train_dataset,
+                                batch_size=args.batch_size, pin_memory=True,
+                                num_workers=args.num_workers, shuffle=True)
+
+      val_loader = DataLoader(val_dataset,
                               batch_size=args.batch_size, pin_memory=True,
-                              num_workers=args.num_workers, shuffle=True)
+                            num_workers=args.num_workers, shuffle=False)
+    
+    elif args.dataset == "flowers102":
+      train_dataset = Flowers102(args.root, transform=preprocess,
+                              download=True, split="train")
 
-    val_loader = DataLoader(val_dataset,
-                            batch_size=args.batch_size, pin_memory=True,
+      val_dataset = Flowers102(args.root, transform=preprocess,
+                            download=True, split="val")
+
+      train_loader = DataLoader(train_dataset,
+                                batch_size=args.batch_size, pin_memory=True,
+                                num_workers=args.num_workers, shuffle=True)
+
+      val_loader = DataLoader(val_dataset,
+                              batch_size=args.batch_size, pin_memory=True,
                             num_workers=args.num_workers, shuffle=False)
 
-    class_names = train_dataset.classes
+    if args.dataset == "cifar100":
+      class_names = train_dataset.classes
+    elif args.dataset == "flowers102":
+      class_names = pd.read_csv("./oxford_flower_102_name.csv")["Name"]
+      class_names = class_names.tolist()
+    
     class_names = refine_classname(class_names)
     texts = [template.format(label) for label in class_names]
 
