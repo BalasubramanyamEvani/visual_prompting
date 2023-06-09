@@ -32,7 +32,7 @@ class FixedPatchPrompter(nn.Module):
         self.patch = nn.Parameter(torch.randn([1, 3, self.psize, self.psize]))
 
     def forward(self, x):
-        prompt = torch.zeros([1, 3, self.isize, self.isize]).cuda()
+        prompt = torch.zeros([1, 3, self.isize, self.isize]).to(x.device)
         prompt[:, :, :self.psize, :self.psize] = self.patch
 
         return x + prompt
@@ -49,7 +49,7 @@ class RandomPatchPrompter(nn.Module):
         x_ = np.random.choice(self.isize - self.psize)
         y_ = np.random.choice(self.isize - self.psize)
 
-        prompt = torch.zeros([1, 3, self.isize, self.isize]).cuda()
+        prompt = torch.zeros([1, 3, self.isize, self.isize]).to(x.device)
         prompt[:, :, x_:x_ + self.psize, y_:y_ + self.psize] = self.patch
 
         return x + prompt
