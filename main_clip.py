@@ -11,7 +11,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR100, Flowers102
+from torchvision.datasets import CIFAR100, Flowers102, CIFAR10, Food101, EuroSAT
 
 import clip
 from models import prompters
@@ -19,6 +19,13 @@ from utils import accuracy, AverageMeter, ProgressMeter, save_checkpoint
 from utils import cosine_lr, convert_models_to_fp32, refine_classname
 
 import pandas as pd
+import gc
+
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Subset, ConcatDataset
 
 
 def parse_option():
@@ -95,26 +102,50 @@ def parse_option():
 
     return args
 
+
 best_acc1 = 0
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda:{}" if torch.cuda.is_available() else "cpu"
+
+
+def train_val_test_dataset(dataset, test_split, val_split):
+    all_indices = list(range(len(dataset)))
+    random.shuffle(all_indices)
+    train_idx, test_idx = train_test_split(all_indices, test_size=test_split)
+    train_idx, val_idx = train_test_split(train_idx, test_size=val_split)
+    
+    datasets = {}
+    
+    datasets["train"] = Subset(dataset, train_idx)
+    datasets["val"] = Subset(dataset, val_idx)
+    datasets["test"] = Subset(dataset, test_idx)
+
+    return datasets
 
 
 def main():
     global best_acc1, device
 
     args = parse_option()
-    print (args)
+    args_pretty_print = []
+    for arg in vars(args):
+        print(f"{arg}: {getattr(args, arg)}")
+        args_pretty_print.append(f"{arg}: {getattr(args, arg)}")
 
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
+    
+    device = device.format(args.gpu) if args.gpu != -1 else "cpu"
 
     # create model
-    model, preprocess = clip.load('ViT-B/32', device, jit=False)
+    if args.arch == "vit_b32":
+        model, preprocess = clip.load('ViT-B/32', device, jit=False)
+    elif args.arch == "vit_b16":
+        model, preprocess = clip.load('ViT-B/16', device, jit=False)
     convert_models_to_fp32(model)
-    model.eval()
 
+    model.eval()
     prompter = prompters.__dict__[args.method](args).to(device)
 
     # optionally resume from a checkpoint
@@ -131,6 +162,8 @@ def main():
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
+                if isinstance(best_acc1, float):
+                    best_acc1 = torch.tensor(best_acc1).float()
                 best_acc1 = best_acc1.to(args.gpu)
             prompter.load_state_dict(checkpoint['state_dict'])
             print("=> loaded checkpoint '{}' (epoch {})"
@@ -148,36 +181,90 @@ def main():
 
       val_dataset = CIFAR100(args.root, transform=preprocess,
                             download=True, train=False)
-
-      train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size, pin_memory=True,
-                                num_workers=args.num_workers, shuffle=True)
-
-      val_loader = DataLoader(val_dataset,
-                              batch_size=args.batch_size, pin_memory=True,
-                            num_workers=args.num_workers, shuffle=False)
+      
+      test_dataset = val_dataset
     
+    elif args.dataset == "cifar10":
+        train_dataset = CIFAR10(args.root, transform=preprocess,
+                              download=True, train=True)
+
+        val_dataset = CIFAR10(args.root, transform=preprocess,
+                            download=True, train=False)
+        
+        test_dataset = val_dataset
+
     elif args.dataset == "flowers102":
       train_dataset = Flowers102(args.root, transform=preprocess,
                               download=True, split="train")
 
       val_dataset = Flowers102(args.root, transform=preprocess,
                             download=True, split="val")
+      
+      test_dataset = Flowers102(args.root, transform=preprocess,
+                            download=True, split="test")
+      
+      full_dataset = ConcatDataset([train_dataset, val_dataset, test_dataset])
+      datasets_splits = train_val_test_dataset(full_dataset, test_split=0.3007, val_split=0.2851)
+      
+      train_dataset = datasets_splits["train"]
+      val_dataset = datasets_splits["val"]
+      test_dataset = datasets_splits["test"]
 
-      train_loader = DataLoader(train_dataset,
-                                batch_size=args.batch_size, pin_memory=True,
-                                num_workers=args.num_workers, shuffle=True)
-
-      val_loader = DataLoader(val_dataset,
-                              batch_size=args.batch_size, pin_memory=True,
-                            num_workers=args.num_workers, shuffle=False)
-
-    if args.dataset == "cifar100":
-      class_names = train_dataset.classes
-    elif args.dataset == "flowers102":
-      class_names = pd.read_csv("./oxford_flower_102_name.csv")["Name"]
-      class_names = class_names.tolist()
+      assert len(train_dataset) == 4093 and len(val_dataset) == 1633 and len(test_dataset) == 2463
     
+    elif args.dataset == "food101":
+        train_dataset = Food101(args.root, transform=preprocess,
+                              download=True, split="train")
+
+        test_dataset = Food101(args.root, transform=preprocess,
+                            download=True, split="test")
+        
+        full_dataset = ConcatDataset([train_dataset, test_dataset])
+        datasets_splits = train_val_test_dataset(full_dataset, test_split=0.3007, val_split=0.2851)
+        train_dataset = datasets_splits["train"]
+        val_dataset = datasets_splits["val"]
+        test_dataset = datasets_splits["test"]
+
+    elif args.dataset == "eurosat":
+        dataset = EuroSAT(args.root, transform=preprocess, download=True)
+        datasets_splits = train_val_test_dataset(dataset, test_split=0.5, val_split=0.4)
+        
+        train_dataset = datasets_splits["train"]
+        val_dataset = datasets_splits["val"]
+        test_dataset = datasets_splits["test"]
+
+    train_loader = DataLoader(train_dataset,
+                            batch_size=args.batch_size, pin_memory=True,
+                            num_workers=args.num_workers, shuffle=True)
+
+    val_loader = DataLoader(val_dataset,
+                            batch_size=args.batch_size, pin_memory=True,
+                        num_workers=args.num_workers, shuffle=False)
+    
+    test_loader = DataLoader(test_dataset,
+                            batch_size=args.batch_size, pin_memory=True,
+                        num_workers=args.num_workers, shuffle=False)
+
+    
+    if args.dataset == "cifar100" or args.dataset == "cifar10" or args.dataset == "food101":
+        class_names = train_dataset.classes
+    elif args.dataset == "flowers102":
+        class_names = pd.read_csv("./oxford_flower_102_name.csv")["Name"]
+        class_names = class_names.tolist()
+    elif args.dataset == "eurosat":
+        class_names = [
+            "AnnualCrop", 
+            "Forest", 
+            "HerbaceousVegetation", 
+            "Highway", 
+            "Industrial", 
+            "Pasture", 
+            "PermanentCrops", 
+            "Residential", 
+            "River", 
+            "SeaLake"
+        ]
+
     class_names = refine_classname(class_names)
     texts = [template.format(label) for label in class_names]
 
@@ -201,22 +288,24 @@ def main():
     args.model_folder = os.path.join(args.model_dir, args.filename)
     if not os.path.isdir(args.model_folder):
         os.makedirs(args.model_folder)
+    
+    with open(os.path.join(args.model_dir, "hyperparams.log"), "w") as fd:
+        fd.write("\n".join(args_pretty_print))
 
     # wandb
     if args.use_wandb:
-        wandb.init(project='Visual Prompting')
+        wandb.init(project='vpt-exps-mit')
         wandb.config.update(args)
         wandb.run.name = args.filename
         wandb.watch(prompter, criterion, log='all', log_freq=10)
 
     if args.evaluate:
-        acc1 = validate(val_loader, texts, model, prompter, criterion, args)
+        acc1 = validate(test_loader, texts, model, prompter, criterion, args)
         return
 
     epochs_since_improvement = 0
 
     for epoch in range(args.epochs):
-
         # train for one epoch
         train(train_loader, texts, model, prompter, optimizer, scheduler, criterion, scaler, epoch, args)
 
@@ -243,7 +332,14 @@ def main():
             if epochs_since_improvement >= args.patience:
                 print("The training halted by early stopping criterion.")
                 break
+    
+    print("------- Testing ---------")
+    loc = 'cuda:{}'.format(args.gpu)
+    best_model_path = os.path.join(args.model_folder, "model_best.pth.tar")
+    checkpoint = torch.load(best_model_path, map_location=loc)
+    prompter.load_state_dict(checkpoint['state_dict'])
 
+    validate(test_loader, texts, model, prompter, criterion, args, prefix="test")
     wandb.run.finish()
 
 
@@ -319,15 +415,16 @@ def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion,
     return losses.avg, top1.avg
 
 
-def validate(val_loader, texts, model, prompter, criterion, args):
+def validate(val_loader, texts, model, prompter, criterion, args, prefix="val"):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1_org = AverageMeter('Original Acc@1', ':6.2f')
     top1_prompt = AverageMeter('Prompt Acc@1', ':6.2f')
+    progresmeter_prefix = "Validation" if prefix == "val" else "Test"
     progress = ProgressMeter(
         len(val_loader),
         [batch_time, losses, top1_org, top1_prompt],
-        prefix='Validate: ')
+        prefix='{}: '.format(progresmeter_prefix))
 
     # switch to evaluation mode
     prompter.eval()
@@ -366,13 +463,16 @@ def validate(val_loader, texts, model, prompter, criterion, args):
 
         if args.use_wandb:
             wandb.log({
-                'val_loss': losses.avg,
-                'val_acc_prompt': top1_prompt.avg,
-                'val_acc_org': top1_org.avg,
+                f'{prefix}_loss': losses.avg,
+                f'{prefix}_acc_prompt': top1_prompt.avg,
+                f'{prefix}_acc_org': top1_org.avg,
             })
 
     return top1_prompt.avg
 
 
 if __name__ == '__main__':
+    wandb.login(key="087a5c3b07ae009d496e4c9369266f0f36fc0edc")
+    gc.collect()
+    torch.cuda.empty_cache()
     main()

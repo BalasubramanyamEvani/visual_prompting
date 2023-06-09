@@ -16,7 +16,7 @@ class PadPrompter(nn.Module):
         self.pad_right = nn.Parameter(torch.randn([1, 3, image_size - pad_size*2, pad_size]))
 
     def forward(self, x):
-        base = torch.zeros(1, 3, self.base_size, self.base_size).cuda()
+        base = torch.zeros(1, 3, self.base_size, self.base_size).to(x.device)
         prompt = torch.cat([self.pad_left, base, self.pad_right], dim=3)
         prompt = torch.cat([self.pad_up, prompt, self.pad_down], dim=2)
         prompt = torch.cat(x.size(0) * [prompt])

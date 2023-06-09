@@ -362,4 +362,5 @@ def validate(indices, val_loader, model, prompter, criterion, args):
 
 
 if __name__ == '__main__':
+    wandb.login(key="087a5c3b07ae009d496e4c9369266f0f36fc0edc")
     main()
